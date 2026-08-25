@@ -40,8 +40,8 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
-    // Official on-device AI Media Enhancement API (Google Play services).
-    implementation("com.google.android.gms:play-services-media-effect-enhancement:16.0.0-beta06")
+    // Asıl Hatanın Çözümü: Google Play Services Media Effects AI kütüphanesi
+    implementation("com.google.android.gms:play-services-media-effects:16.0.0-beta01")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")
