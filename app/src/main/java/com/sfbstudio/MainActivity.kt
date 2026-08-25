@@ -17,7 +17,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -38,7 +37,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -57,6 +55,7 @@ import com.google.android.gms.media.effect.enhancement.EnhancementOptions
 import com.google.android.gms.media.effect.enhancement.EnhancementSession
 import com.google.android.gms.media.effect.enhancement.EnhancementSessionCallback
 import com.google.android.gms.common.api.Status
+import com.google.android.gms.tasks.Task
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -110,8 +109,13 @@ class StudioViewModel(
     private fun checkAi() {
         viewModelScope.launch(Dispatchers.Default) {
             try {
-                val supported = runCatching { client.isDeviceSupportedAsync() }
-                    .getOrNull() ?: false
+                val supported: Boolean = suspendCancellableCoroutine { continuation ->
+                    client.isDeviceSupported().addOnSuccessListener { result ->
+                        if (continuation.isActive) continuation.resume(result ?: false)
+                    }.addOnFailureListener { e ->
+                        if (continuation.isActive) continuation.resume(false)
+                    }
+                }
                     
                 if (!supported) {
                     _state.value = _state.value.copy(
@@ -126,8 +130,13 @@ class StudioViewModel(
                     status = "AI motoru kontrol ediliyor…"
                 )
 
-                val installed = runCatching { client.isModuleInstalledAsync() }
-                    .getOrNull() ?: false
+                val installed: Boolean = suspendCancellableCoroutine { continuation ->
+                    client.isModuleInstalled().addOnSuccessListener { result ->
+                        if (continuation.isActive) continuation.resume(result ?: false)
+                    }.addOnFailureListener {
+                        if (continuation.isActive) continuation.resume(false)
+                    }
+                }
                     
                 if (!installed) {
                     _state.value = _state.value.copy(status = "AI modeli cihaza indiriliyor…")
@@ -198,7 +207,16 @@ class StudioViewModel(
         }
         
         return session?.let { s ->
-            s.processBitmapAsync(input, s.defaultOptions)
+            s.processBitmapAsync(input, EnhancementOptions(
+                input.width,
+                input.height,
+                EnhancementMode.BITMAP,
+                enableTonemap = true,
+                enableDeblurDenoise = true,
+                enableDenoiseOnly = false,
+                enableUpscale = true,
+                enableFaceDetection = false
+            ))
         } ?: throw IllegalStateException("Enhancement session is null")
     }
 
@@ -316,6 +334,7 @@ private suspend fun EnhancementClient.createSessionAsync(
             
             override fun onSessionDestroyed() = Unit
             override fun onSessionDisconnected(status: Status) = Unit
+            override fun onCancelled() = Unit
         }
         
         createSession(options, callback).addOnFailureListener(executor) { e ->
@@ -345,7 +364,7 @@ private suspend fun EnhancementSession.processBitmapAsync(
     process(bitmap, options, callback)
 }
 
-private suspend fun com.google.android.gms.tasks.Task<Void>.awaitTask() =
+private suspend fun Task<Void>.awaitTask() =
     suspendCancellableCoroutine { continuation ->
         addOnSuccessListener { 
             if (continuation.isActive) continuation.resume(Unit) 
