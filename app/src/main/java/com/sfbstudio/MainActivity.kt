@@ -1,42 +1,29 @@
 package com.sfbstudio
 
-import android.content.ContentValues
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
-import android.graphics.Paint
 import android.net.Uri
 import android.os.Bundle
-import android.provider.MediaStore
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -44,358 +31,60 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.google.android.gms.media.effect.enhancement.Enhancement
-import com.google.android.gms.media.effect.enhancement.EnhancementCallback
-import com.google.android.gms.media.effect.enhancement.EnhancementClient
-import com.google.android.gms.media.effect.enhancement.EnhancementMode
-import com.google.android.gms.media.effect.enhancement.EnhancementOptions
-import com.google.android.gms.media.effect.enhancement.EnhancementSession
-import com.google.android.gms.media.effect.enhancement.EnhancementSessionCallback
-import com.google.android.gms.common.api.Status
-import com.google.android.gms.tasks.Task
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-
-data class StudioState(
-    val original: Bitmap? = null,
-    val result: Bitmap? = null,
-    val busy: Boolean = false,
-    val status: String = "Bir fotoğraf seçin.",
-    val aiSupported: Boolean = false,
-    val aiModuleReady: Boolean = false
-)
-
-class StudioViewModel(
-    private val applicationContext: android.content.Context
-) : ViewModel() {
-
-    private val _state = MutableStateFlow(StudioState())
-    val state = _state.asStateFlow()
-
-    private val client: EnhancementClient = Enhancement.getClient(applicationContext)
-    private val executor: ExecutorService = Executors.newSingleThreadExecutor()
-    private var session: EnhancementSession? = null
-
-    fun loadBitmap(uri: Uri) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val bitmap = applicationContext.contentResolver.openInputStream(uri)?.use {
-                    BitmapFactory.decodeStream(it)
-                } ?: run {
-                    _state.value = _state.value.copy(status = "Fotoğraf okunamadı.")
-                    return@launch
-                }
-
-                val safe = downsampleForMemory(bitmap)
-                _state.value = StudioState(original = safe, status = "Fotoğraf hazır.")
-                checkAi()
-            } catch (e: Exception) {
-                _state.value = _state.value.copy(status = "Fotoğraf okunurken hata oluştu: ${e.message}")
-            }
-        }
-    }
-
-    private fun checkAi() {
-        viewModelScope.launch(Dispatchers.Default) {
-            try {
-                val supported: Boolean = suspendCancellableCoroutine { continuation ->
-                    client.isDeviceSupported().addOnSuccessListener { result ->
-                        if (continuation.isActive) continuation.resume(result ?: false)
-                    }.addOnFailureListener { e ->
-                        if (continuation.isActive) continuation.resume(false)
-                    }
-                }
-                    
-                if (!supported) {
-                    _state.value = _state.value.copy(
-                        aiSupported = false,
-                        status = "Bu cihaz AI hızlandırmayı desteklemiyor. Yerel fallback kullanılabilir."
-                    )
-                    return@launch
-                }
-
-                _state.value = _state.value.copy(
-                    aiSupported = true,
-                    status = "AI motoru kontrol ediliyor…"
-                )
-
-                val installed: Boolean = suspendCancellableCoroutine { continuation ->
-                    client.isModuleInstalled().addOnSuccessListener { result ->
-                        if (continuation.isActive) continuation.resume(result ?: false)
-                    }.addOnFailureListener {
-                        if (continuation.isActive) continuation.resume(false)
-                    }
-                }
-                    
-                if (!installed) {
-                    _state.value = _state.value.copy(status = "AI modeli cihaza indiriliyor…")
-                    client.installModule().awaitTask()
-                }
-
-                _state.value = _state.value.copy(
-                    aiSupported = true,
-                    aiModuleReady = true,
-                    status = "AI motoru hazır."
-                )
-            } catch (e: Exception) {
-                _state.value = _state.value.copy(
-                    aiSupported = false,
-                    aiModuleReady = false,
-                    status = "AI motoru kullanılamadı. Fallback hazır."
-                )
-            }
-        }
-    }
-
-    fun enhance() {
-        val input = _state.value.original ?: return
-        if (_state.value.busy) return
-
-        viewModelScope.launch(Dispatchers.IO) {
-            _state.value = _state.value.copy(busy = true, status = "Görüntü iyileştiriliyor…")
-            try {
-                val result = if (_state.value.aiSupported && _state.value.aiModuleReady) {
-                    enhanceWithAi(input)
-                } else {
-                    fallbackEnhance(input)
-                }
-                _state.value = _state.value.copy(
-                    result = result,
-                    busy = false,
-                    status = if (_state.value.aiSupported) "AI super-resolution tamamlandı." else "Yerel fallback tamamlandı."
-                )
-            } catch (e: Exception) {
-                releaseSession()
-                _state.value = _state.value.copy(
-                    busy = false,
-                    status = "AI başarısız oldu; yerel fallback uygulanıyor…"
-                )
-                try {
-                    val fallback = fallbackEnhance(input)
-                    _state.value = _state.value.copy(result = fallback, status = "Fallback tamamlandı.")
-                } catch (fallbackError: Exception) {
-                    _state.value = _state.value.copy(status = "İşlem başarısız: ${fallbackError.message}")
-                }
-            }
-        }
-    }
-
-    private suspend fun enhanceWithAi(input: Bitmap): Bitmap {
-        if (session == null) {
-            val options = EnhancementOptions(
-                input.width,
-                input.height,
-                EnhancementMode.BITMAP,
-                enableTonemap = true,
-                enableDeblurDenoise = true,
-                enableDenoiseOnly = false,
-                enableUpscale = true,
-                enableFaceDetection = false
-            )
-            session = client.createSessionAsync(options, executor)
-        }
-        
-        return session?.let { s ->
-            s.processBitmapAsync(input, EnhancementOptions(
-                input.width,
-                input.height,
-                EnhancementMode.BITMAP,
-                enableTonemap = true,
-                enableDeblurDenoise = true,
-                enableDenoiseOnly = false,
-                enableUpscale = true,
-                enableFaceDetection = false
-            ))
-        } ?: throw IllegalStateException("Enhancement session is null")
-    }
-
-    private fun fallbackEnhance(input: Bitmap): Bitmap {
-        val outWidth = (input.width * 2).coerceAtMost(4096)
-        val outHeight = (input.height * 2).coerceAtMost(4096)
-        val scaled = Bitmap.createScaledBitmap(input, outWidth, outHeight, true)
-        
-        return try {
-            val result = Bitmap.createBitmap(outWidth, outHeight, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(result)
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-            
-            val matrix = ColorMatrix().apply {
-                setSaturation(1.05f)
-                val brightness = 1.08f
-                val offset = -8f
-                val m = floatArrayOf(
-                    brightness, 0f, 0f, 0f, offset,
-                    0f, brightness, 0f, 0f, offset,
-                    0f, 0f, brightness, 0f, offset,
-                    0f, 0f, 0f, 1f, 0f
-                )
-                set(m)
-            }
-            
-            paint.colorFilter = ColorMatrixColorFilter(matrix)
-            canvas.drawBitmap(scaled, 0f, 0f, paint)
-            result
-        } finally {
-            if (scaled !== input) {
-                scaled.recycle()
-            }
-        }
-    }
-
-    fun saveResult() {
-        val bitmap = _state.value.result ?: return
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val name = "SFBStudio_${System.currentTimeMillis()}.jpg"
-                val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, name)
-                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SFB Studio")
-                }
-                
-                val uri = applicationContext.contentResolver.insert(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                    values
-                )
-                
-                if (uri != null) {
-                    applicationContext.contentResolver.openOutputStream(uri)?.use { out ->
-                        bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
-                    }
-                    _state.value = _state.value.copy(status = "Galeriye kaydedildi.")
-                } else {
-                    _state.value = _state.value.copy(status = "Galeriye kaydedilemedi.")
-                }
-            } catch (e: Exception) {
-                _state.value = _state.value.copy(status = "Kaydetme hatası: ${e.message}")
-            }
-        }
-    }
-
-    fun clearResult() {
-        _state.value = _state.value.copy(result = null, status = "Yeni fotoğraf seçebilirsiniz.")
-    }
-
-    private fun downsampleForMemory(bitmap: Bitmap): Bitmap {
-        val maxSide = 3072
-        val max = maxOf(bitmap.width, bitmap.height)
-        if (max <= maxSide) return bitmap
-        
-        val scale = maxSide.toFloat() / max
-        val w = (bitmap.width * scale).toInt().coerceAtLeast(1)
-        val h = (bitmap.height * scale).toInt().coerceAtLeast(1)
-        val resized = Bitmap.createScaledBitmap(bitmap, w, h, true)
-        
-        if (resized !== bitmap) {
-            bitmap.recycle()
-        }
-        
-        return resized
-    }
-
-    private fun releaseSession() {
-        session?.release()
-        session = null
-    }
-
-    override fun onCleared() {
-        releaseSession()
-        executor.shutdown()
-        super.onCleared()
-    }
-}
-
-private suspend fun EnhancementClient.createSessionAsync(
-    options: EnhancementOptions,
-    executor: ExecutorService
-): EnhancementSession = withContext(Dispatchers.Default) {
-    suspendCancellableCoroutine { continuation ->
-        val callback = object : EnhancementSessionCallback {
-            override fun onSessionCreated(session: EnhancementSession) {
-                if (continuation.isActive) continuation.resume(session)
-            }
-            
-            override fun onSessionCreationFailed(status: Status) {
-                if (continuation.isActive) continuation.resumeWithException(
-                    IllegalStateException("Session creation failed: ${status.statusMessage}")
-                )
-            }
-            
-            override fun onSessionDestroyed() = Unit
-            override fun onSessionDisconnected(status: Status) = Unit
-            override fun onCancelled() = Unit
-        }
-        
-        createSession(options, callback).addOnFailureListener(executor) { e ->
-            if (continuation.isActive) continuation.resumeWithException(e)
-        }
-    }
-}
-
-private suspend fun EnhancementSession.processBitmapAsync(
-    bitmap: Bitmap,
-    options: EnhancementOptions
-): Bitmap = suspendCancellableCoroutine { continuation ->
-    val callback = object : EnhancementCallback {
-        override fun onBitmapProcessed(enhancedBitmap: Bitmap) {
-            if (continuation.isActive) continuation.resume(enhancedBitmap)
-        }
-        
-        override fun onError(statusCode: Int) {
-            if (continuation.isActive) continuation.resumeWithException(
-                IllegalStateException("Bitmap processing failed with code: $statusCode")
-            )
-        }
-        
-        override fun onSurfaceProcessed(timestamp: Long) = Unit
-    }
-    
-    process(bitmap, options, callback)
-}
-
-private suspend fun Task<Void>.awaitTask() =
-    suspendCancellableCoroutine { continuation ->
-        addOnSuccessListener { 
-            if (continuation.isActive) continuation.resume(Unit) 
-        }.addOnFailureListener { e -> 
-            if (continuation.isActive) continuation.resumeWithException(e) 
-        }
-    }
 
 class MainActivity : ComponentActivity() {
-    private val viewModel by viewModels<StudioViewModel> {
-        object : androidx.lifecycle.ViewModelProvider.Factory {
-            override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                @Suppress("UNCHECKED_CAST")
-                return StudioViewModel(applicationContext) as T
-            }
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { SfbStudioApp(viewModel) }
+        setContent {
+            SfbStudioApp()
+        }
     }
 }
 
-@Composable
-fun SfbStudioApp(vm: StudioViewModel) {
-    val state by vm.state.collectAsStateWithLifecycle()
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        if (uri != null) vm.loadBitmap(uri)
+private fun decodeBitmap(uri: Uri, contentResolver: android.content.ContentResolver): Bitmap? {
+    return contentResolver.openInputStream(uri)?.use { input ->
+        BitmapFactory.decodeStream(input)
     }
-    var compare by remember { mutableFloatStateOf(1f) }
+}
+
+@androidx.compose.runtime.Composable
+private fun SfbStudioApp() {
+    var selectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var resolutionText by remember { mutableStateOf("Henüz fotoğraf seçilmedi.") }
+    var loading by remember { mutableStateOf(false) }
+
+    val picker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+
+        loading = true
+        val activity = androidx.compose.ui.platform.LocalContext.current as? ComponentActivity
+        val resolver = activity?.contentResolver
+
+        if (resolver == null) {
+            loading = false
+            resolutionText = "Fotoğraf açılamadı."
+            return@rememberLauncherForActivityResult
+        }
+
+        activity.lifecycleScope.launch(Dispatchers.IO) {
+            val bitmap = decodeBitmap(uri, resolver)
+            withContext(Dispatchers.Main) {
+                selectedBitmap = bitmap
+                loading = false
+                resolutionText = if (bitmap != null) {
+                    "Çözünürlük: ${bitmap.width} × ${bitmap.height} px"
+                } else {
+                    "Fotoğraf okunamadı."
+                }
+            }
+        }
+    }
 
     MaterialTheme {
         Scaffold { padding ->
@@ -403,82 +92,49 @@ fun SfbStudioApp(vm: StudioViewModel) {
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
-                    .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                    .padding(20.dp)
+                    .verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Top
             ) {
-                Text("SFB Studio", style = MaterialTheme.typography.headlineMedium)
-                Text("AI Image Enhance • v0.1 Test")
-                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = "SFB Studio",
+                    style = MaterialTheme.typography.headlineLarge
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Fotoğraf geliştirme stüdyosu • v0.1 Test",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                Spacer(modifier = Modifier.height(24.dp))
 
                 Button(
                     onClick = { picker.launch("image/*") },
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !loading
                 ) {
-                    Text("Fotoğraf Seç")
+                    Text(if (loading) "Fotoğraf yükleniyor…" else "📷 Galeriden Fotoğraf Seç")
                 }
 
-                Spacer(Modifier.height(12.dp))
-                Text(state.status)
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(resolutionText)
 
-                state.original?.let { original ->
-                    Spacer(Modifier.height(16.dp))
-                    Text("Orijinal • ${original.width} × ${original.height}")
+                selectedBitmap?.let { bitmap ->
+                    Spacer(modifier = Modifier.height(20.dp))
                     Image(
-                        bitmap = original.asImageBitmap(),
-                        contentDescription = "Orijinal fotoğraf",
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "Seçilen fotoğraf",
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(260.dp),
+                            .height(360.dp),
                         contentScale = ContentScale.Fit
                     )
                 }
 
-                state.result?.let { result ->
-                    Spacer(Modifier.height(16.dp))
-                    Text("Sonuç • ${result.width} × ${result.height}")
-                    Slider(
-                        value = compare,
-                        onValueChange = { compare = it },
-                        valueRange = 0f..1f
-                    )
-                    Image(
-                        bitmap = result.asImageBitmap(),
-                        contentDescription = "İşlenmiş fotoğraf",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(260.dp),
-                        contentScale = ContentScale.Fit
-                    )
-                }
-
-                Spacer(Modifier.height(16.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = { vm.enhance() },
-                        enabled = state.original != null && !state.busy
-                    ) {
-                        if (state.busy) {
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp))
-                        } else {
-                            Text("AI Upscale")
-                        }
-                    }
-                    OutlinedButton(
-                        onClick = { vm.saveResult() },
-                        enabled = state.result != null
-                    ) {
-                        Text("Kaydet")
-                    }
-                }
-
-                Spacer(Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(24.dp))
                 Text(
-                    if (state.aiSupported) "Cihaz: AI hızlandırma uygun" else "Cihaz: fallback modu",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Text(
-                    "Destekli cihazlarda Google Play services Media Enhancement, görüntüde eksik yüksek frekanslı ayrıntıları yeniden oluşturan super-resolution modeli kullanır.",
+                    text = "V0.1: Galeriden fotoğraf seçme testi. AI Upscale bir sonraki sürümde eklenecek.",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
