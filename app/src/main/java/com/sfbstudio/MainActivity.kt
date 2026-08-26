@@ -1,5 +1,6 @@
 package com.sfbstudio
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -22,16 +23,18 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -39,49 +42,42 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            SfbStudioApp()
-        }
+        setContent { SfbStudioApp() }
     }
 }
 
-private fun decodeBitmap(uri: Uri, contentResolver: android.content.ContentResolver): Bitmap? {
-    return contentResolver.openInputStream(uri)?.use { input ->
-        BitmapFactory.decodeStream(input)
+private suspend fun decodeBitmap(context: Context, uri: Uri): Bitmap? =
+    withContext(Dispatchers.IO) {
+        runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                BitmapFactory.decodeStream(input)
+            }
+        }.getOrNull()
     }
-}
 
-@androidx.compose.runtime.Composable
+@Composable
 private fun SfbStudioApp() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     var selectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var resolutionText by remember { mutableStateOf("Henüz fotoğraf seçilmedi.") }
     var loading by remember { mutableStateOf(false) }
 
     val picker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
-    ) { uri ->
+    ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
 
         loading = true
-        val activity = androidx.compose.ui.platform.LocalContext.current as? ComponentActivity
-        val resolver = activity?.contentResolver
-
-        if (resolver == null) {
+        scope.launch {
+            val bitmap = decodeBitmap(context, uri)
+            selectedBitmap = bitmap
             loading = false
-            resolutionText = "Fotoğraf açılamadı."
-            return@rememberLauncherForActivityResult
-        }
-
-        activity.lifecycleScope.launch(Dispatchers.IO) {
-            val bitmap = decodeBitmap(uri, resolver)
-            withContext(Dispatchers.Main) {
-                selectedBitmap = bitmap
-                loading = false
-                resolutionText = if (bitmap != null) {
-                    "Çözünürlük: ${bitmap.width} × ${bitmap.height} px"
-                } else {
-                    "Fotoğraf okunamadı."
-                }
+            resolutionText = if (bitmap != null) {
+                "Çözünürlük: ${bitmap.width} × ${bitmap.height} px"
+            } else {
+                "Fotoğraf okunamadı."
             }
         }
     }
@@ -134,7 +130,7 @@ private fun SfbStudioApp() {
 
                 Spacer(modifier = Modifier.height(24.dp))
                 Text(
-                    text = "V0.1: Galeriden fotoğraf seçme testi. AI Upscale bir sonraki sürümde eklenecek.",
+                    text = "V0.1: Galeriden fotoğraf seçme testi. AI Upscale sonraki sürümde eklenecek.",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
