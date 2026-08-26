@@ -1,8 +1,6 @@
 package com.sfbstudio
 
-import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -20,6 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -35,9 +34,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,39 +43,43 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private suspend fun decodeBitmap(context: Context, uri: Uri): Bitmap? =
-    withContext(Dispatchers.IO) {
-        runCatching {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                BitmapFactory.decodeStream(input)
-            }
-        }.getOrNull()
-    }
-
 @Composable
 private fun SfbStudioApp() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val upscaler = remember { RealEsrganUpscaler(context.applicationContext) }
 
     var selectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var resultBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var resolutionText by remember { mutableStateOf("Henüz fotoğraf seçilmedi.") }
-    var loading by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf("Hazır") }
+    var busy by remember { mutableStateOf(false) }
+    var modelReady by remember { mutableStateOf(false) }
 
     val picker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
-
-        loading = true
+        busy = true
+        resultBitmap = null
+        status = "Fotoğraf yükleniyor…"
         scope.launch {
-            val bitmap = decodeBitmap(context, uri)
-            selectedBitmap = bitmap
-            loading = false
-            resolutionText = if (bitmap != null) {
-                "Çözünürlük: ${bitmap.width} × ${bitmap.height} px"
-            } else {
-                "Fotoğraf okunamadı."
+            runCatching {
+                val bitmap = uriToBitmap(context, uri)
+                selectedBitmap = bitmap
+                resolutionText = "Giriş: ${bitmap.width} × ${bitmap.height} px"
+                if (!modelReady) {
+                    status = "AI modeli hazırlanıyor… İlk kullanımda yaklaşık 67 MB indirilecek."
+                    upscaler.ensureModel()
+                    modelReady = true
+                }
+                status = "AI Upscale çalışıyor…"
+                resultBitmap = upscaler.upscale(uri)
+                status = "Tamamlandı • 4× AI Upscale"
+            }.onFailure {
+                status = "Hata: ${it.message ?: "işlem başarısız"}"
             }
+            busy = false
         }
     }
 
@@ -93,47 +94,66 @@ private fun SfbStudioApp() {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Top
             ) {
-                Text(
-                    text = "SFB Studio",
-                    style = MaterialTheme.typography.headlineLarge
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Fotoğraf geliştirme stüdyosu • v0.1 Test",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-
-                Spacer(modifier = Modifier.height(24.dp))
+                Text("SFB Studio", style = MaterialTheme.typography.headlineLarge)
+                Spacer(Modifier.height(6.dp))
+                Text("AI Photo Upscaler • V0.2", style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(24.dp))
 
                 Button(
                     onClick = { picker.launch("image/*") },
                     modifier = Modifier.fillMaxWidth(),
-                    enabled = !loading
+                    enabled = !busy
                 ) {
-                    Text(if (loading) "Fotoğraf yükleniyor…" else "📷 Galeriden Fotoğraf Seç")
+                    Text(if (busy) "İşleniyor…" else "📷 Fotoğraf Seç ve AI ile 4× Büyüt")
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(Modifier.height(16.dp))
+                Text(status)
+                if (busy) {
+                    Spacer(Modifier.height(10.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+                Spacer(Modifier.height(10.dp))
                 Text(resolutionText)
 
-                selectedBitmap?.let { bitmap ->
-                    Spacer(modifier = Modifier.height(20.dp))
+                selectedBitmap?.let {
+                    Spacer(Modifier.height(18.dp))
+                    Text("Önce", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
                     Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "Seçilen fotoğraf",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(360.dp),
+                        bitmap = it.asImageBitmap(),
+                        contentDescription = "Orijinal fotoğraf",
+                        modifier = Modifier.fillMaxWidth().height(300.dp),
                         contentScale = ContentScale.Fit
                     )
                 }
 
-                Spacer(modifier = Modifier.height(24.dp))
+                resultBitmap?.let {
+                    Spacer(Modifier.height(18.dp))
+                    Text("Sonra • AI Upscale", style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Image(
+                        bitmap = it.asImageBitmap(),
+                        contentDescription = "AI ile büyütülmüş fotoğraf",
+                        modifier = Modifier.fillMaxWidth().height(360.dp),
+                        contentScale = ContentScale.Fit
+                    )
+                    Text("Çıkış: ${it.width} × ${it.height} px")
+                }
+
+                Spacer(Modifier.height(24.dp))
                 Text(
-                    text = "V0.1: Galeriden fotoğraf seçme testi. AI Upscale sonraki sürümde eklenecek.",
+                    "V0.2: cihaz üzerinde TensorFlow Lite + Real-ESRGAN x4plus. Model ilk kullanımda indirilir ve cihazda saklanır.",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
         }
     }
 }
+
+private suspend fun uriToBitmap(context: android.content.Context, uri: Uri): Bitmap =
+    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            android.graphics.BitmapFactory.decodeStream(input)
+        } ?: error("Fotoğraf okunamadı")
+    }
