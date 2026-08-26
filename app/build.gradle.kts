@@ -39,5 +39,7 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("org.tensorflow:tensorflow-lite:2.17.0")
+    // OkHttp: more robust model downloading (follows redirects, better timeouts)
+    implementation("com.squareup.okhttp3:okhttp:4.11.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
