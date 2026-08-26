@@ -49,7 +49,10 @@ class RealEsrganUpscaler(private val context: Context) {
             if (file.exists()) file.delete()
             check(temp.renameTo(file)) { "Model dosyası kaydedilemedi" }
         } finally {
-            connection.disconnect()
+            try {
+                connection.disconnect()
+            } catch (_: Exception) {
+            }
             if (temp.exists()) temp.delete()
         }
     }
@@ -89,31 +92,40 @@ class RealEsrganUpscaler(private val context: Context) {
     }
 
     private fun runTile(model: Interpreter, bitmap: Bitmap, width: Int, height: Int): Bitmap {
+        // Resize interpreter input to this tile size
         model.resizeInput(0, intArrayOf(1, height, width, 3))
         model.allocateTensors()
+
+        // Prepare input buffer (floats: R,G,B normalized to [0,1])
         val input = ByteBuffer.allocateDirect(width * height * 3 * 4).order(ByteOrder.nativeOrder())
         val pixels = IntArray(width * height)
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
         for (pixel in pixels) {
-            input.putFloat(((pixel shr 16) and 255) / 255f)
-            input.putFloat(((pixel shr 8) and 255) / 255f)
-            input.putFloat((pixel and 255) / 255f)
+            input.putFloat(((pixel shr 16) and 0xFF) / 255f)
+            input.putFloat(((pixel shr 8) and 0xFF) / 255f)
+            input.putFloat((pixel and 0xFF) / 255f)
         }
         input.rewind()
 
-        val shape = model.getOutputTensor(0).shape()
+        // Prepare output buffer based on model output shape
+        val shape = model.getOutputTensor(0).shape() // expected [1, oh, ow, 3]
         val oh = shape[1]
         val ow = shape[2]
         val output = ByteBuffer.allocateDirect(oh * ow * 3 * 4).order(ByteOrder.nativeOrder())
+
         model.run(input, output)
         output.rewind()
 
         val result = Bitmap.createBitmap(ow, oh, Bitmap.Config.ARGB_8888)
         val outPixels = IntArray(ow * oh)
         for (i in outPixels.indices) {
-            val r = (output.float.coerceIn(0f, 1f) * 255f).toInt()
-            val g = (output.float.coerceIn(0f, 1f) * 255f).toInt()
-            val b = (output.float.coerceIn(0f, 1f) * 255f).toInt()
+            // read R,G,B floats in order and convert to 0..255
+            val rf = try { output.getFloat() } catch (e: Exception) { 0f }
+            val gf = try { output.getFloat() } catch (e: Exception) { 0f }
+            val bf = try { output.getFloat() } catch (e: Exception) { 0f }
+            val r = (rf.coerceIn(0f, 1f) * 255f).toInt()
+            val g = (gf.coerceIn(0f, 1f) * 255f).toInt()
+            val b = (bf.coerceIn(0f, 1f) * 255f).toInt()
             outPixels[i] = (255 shl 24) or (r shl 16) or (g shl 8) or b
         }
         result.setPixels(outPixels, 0, ow, 0, 0, ow, oh)
