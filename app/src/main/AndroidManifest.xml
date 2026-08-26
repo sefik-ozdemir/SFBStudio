@@ -8,17 +8,6 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.SFBStudio">
 
-        <meta-data
-            android:name="com.google.android.gms.version"
-            android:value="@integer/google_play_services_version" />
-
-        <!-- Optional accelerator libraries: never make the app incompatible. -->
-        <uses-native-library android:name="libOpenCL.so" android:required="false" />
-        <uses-native-library android:name="libOpenCL-car.so" android:required="false" />
-        <uses-native-library android:name="libOpenCL-pixel.so" android:required="false" />
-        <uses-native-library android:name="libGLESv2.so" android:required="false" />
-        <uses-native-library android:name="libGLESv3.so" android:required="false" />
-
         <activity
             android:name=".MainActivity"
             android:exported="true">
