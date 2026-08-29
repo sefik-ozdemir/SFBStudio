@@ -28,7 +28,6 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.statusBars
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -41,6 +40,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -72,37 +72,77 @@ private fun SfbStudioApp() {
     val scope = rememberCoroutineScope()
     val upscaler = remember { RealEsrganUpscaler(context.applicationContext) }
 
+    DisposableEffect(Unit) {
+        onDispose { upscaler.close() }
+    }
+
+    var selectedUri by remember { mutableStateOf<Uri?>(null) }
     var selectedBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var resultBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var resolutionText by remember { mutableStateOf("Henüz fotoğraf seçilmedi.") }
-    var status by remember { mutableStateOf("Hazır") }
+    var status by remember { mutableStateOf("Fotoğraf seçerek başlayın.") }
     var busy by remember { mutableStateOf(false) }
-    var modelReady by remember { mutableStateOf(false) }
+    var operation by remember { mutableStateOf("") }
 
     val picker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
-        busy = true
-        resultBitmap = null
-        status = "Fotoğraf yükleniyor…"
         scope.launch {
             runCatching {
+                busy = true
+                operation = "Fotoğraf hazırlanıyor…"
+                resultBitmap = null
                 val bitmap = uriToBitmap(context, uri)
+                selectedUri = uri
                 selectedBitmap = bitmap
                 resolutionText = "Giriş: ${bitmap.width} × ${bitmap.height} px"
-                if (!modelReady) {
-                    status = "AI modeli hazırlanıyor… İlk kullanımda yaklaşık 67 MB indirilecek."
-                    upscaler.ensureModel()
-                    modelReady = true
-                }
-                status = "AI Upscale çalışıyor…"
-                resultBitmap = upscaler.upscale(uri)
-                status = "Tamamlandı • 4× AI Upscale"
+                status = "Fotoğraf hazır. Şimdi 4× AI Upscale'a basın."
+                operation = ""
             }.onFailure {
-                status = "Hata: ${it.message ?: "işlem başarısız"}"
+                status = "Hata: ${it.message ?: "fotoğraf okunamadı"}"
+                operation = ""
             }
             busy = false
+        }
+    }
+
+    fun startUpscale() {
+        val uri = selectedUri ?: return
+        scope.launch {
+            busy = true
+            operation = "AI modeli kontrol ediliyor…"
+            status = "Hazırlanıyor…"
+            runCatching {
+                upscaler.ensureModel()
+                operation = "AI Upscale çalışıyor…"
+                status = "Fotoğraf 4× büyütülüyor. Bu işlem cihazın gücüne göre biraz sürebilir."
+                resultBitmap = upscaler.upscale(uri)
+                val result = resultBitmap ?: error("Upscale sonucu oluşturulamadı")
+                status = "Tamamlandı • 4× AI Upscale"
+                resolutionText = "Giriş: ${selectedBitmap?.width} × ${selectedBitmap?.height} px  →  Çıkış: ${result.width} × ${result.height} px"
+            }.onFailure {
+                resultBitmap = null
+                status = "Upscale hatası: ${it.message ?: "işlem başarısız"}"
+            }
+            operation = ""
+            busy = false
+        }
+    }
+
+    fun saveResult() {
+        val bitmap = resultBitmap ?: run {
+            Toast.makeText(context, "Önce 4× AI Upscale işlemini tamamlayın", Toast.LENGTH_SHORT).show()
+            return
+        }
+        scope.launch {
+            runCatching {
+                saveBitmapToGallery(context, bitmap)
+            }.onSuccess {
+                Toast.makeText(context, "Sonuç Pictures/SFBStudio içine kaydedildi", Toast.LENGTH_LONG).show()
+            }.onFailure {
+                Toast.makeText(context, "Kaydetme hatası: ${it.message}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -115,42 +155,44 @@ private fun SfbStudioApp() {
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(WindowInsets.statusBars.asPaddingValues())
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text("SFB Studio", fontWeight = FontWeight.Bold)
-                            Text("AI Photo Upscaler • V0.3", style = MaterialTheme.typography.bodySmall)
+                            Text("AI Photo Upscaler • V0.4", style = MaterialTheme.typography.bodySmall)
                         }
-                        if (resultBitmap != null && !busy) {
-                            OutlinedButton(onClick = {
-                                scope.launch {
-                                    resultBitmap?.let { bitmap ->
-                                        saveBitmapToGallery(context, bitmap)
-                                        Toast.makeText(context, "Sonuç galeriye kaydedildi", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                            }) {
-                                Text("Kaydet")
-                            }
+                        OutlinedButton(
+                            onClick = { saveResult() },
+                            enabled = resultBitmap != null && !busy
+                        ) {
+                            Text("Kaydet")
                         }
                     }
                 }
             },
             bottomBar = {
-                Surface(shadowElevation = 8.dp) {
-                    Column(
+                Surface(shadowElevation = 10.dp) {
+                    Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 10.dp)
-                            .padding(WindowInsets.navigationBars.asPaddingValues())
+                            .padding(horizontal = 14.dp, vertical = 8.dp)
+                            .padding(WindowInsets.navigationBars.asPaddingValues()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Button(
+                        OutlinedButton(
                             onClick = { picker.launch("image/*") },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !busy
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f)
                         ) {
-                            Text(if (busy) "İşleniyor…" else "📷 Fotoğraf Seç ve 4× Büyüt")
+                            Text("📷 Fotoğraf Seç")
+                        }
+                        Button(
+                            onClick = { saveResult() },
+                            enabled = resultBitmap != null && !busy,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("✓ Kaydet")
                         }
                     }
                 }
@@ -162,54 +204,69 @@ private fun SfbStudioApp() {
                     .padding(padding)
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 16.dp)
-                    .padding(bottom = 20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Top
+                    .padding(bottom = 18.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(14.dp))
+
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text(status, fontWeight = FontWeight.Medium)
+                        Text(status, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(6.dp))
                         Text(resolutionText, style = MaterialTheme.typography.bodySmall)
                         if (busy) {
                             Spacer(Modifier.height(10.dp))
                             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            Spacer(Modifier.height(6.dp))
+                            Text(operation, style = MaterialTheme.typography.bodySmall)
                         }
                     }
                 }
 
-                selectedBitmap?.let {
-                    Spacer(Modifier.height(16.dp))
-                    PreviewCard(title = "Önce • Orijinal", bitmap = it, height = 280)
+                selectedBitmap?.let { bitmap ->
+                    Spacer(Modifier.height(14.dp))
+                    PreviewCard("Önce • Orijinal", bitmap, 300)
                 }
 
-                resultBitmap?.let {
-                    Spacer(Modifier.height(16.dp))
-                    PreviewCard(title = "Sonra • AI Upscale", bitmap = it, height = 320)
-                    Spacer(Modifier.height(8.dp))
-                    Text("Çıkış: ${it.width} × ${it.height} px", style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(10.dp))
-                    Button(
-                        onClick = { saveBitmapToGallery(context, it) },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("✓ DEĞİŞİKLİKLERİ KAYDET")
-                    }
+                Spacer(Modifier.height(14.dp))
+                Button(
+                    onClick = { startUpscale() },
+                    enabled = selectedUri != null && !busy,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(if (busy) "İşleniyor…" else "✨ 4× AI UPSCALE BAŞLAT")
                 }
 
-                Spacer(Modifier.height(20.dp))
+                Spacer(Modifier.height(14.dp))
                 Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text("İşlem Bilgisi", fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(6.dp))
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Text("AI Upscale", fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(5.dp))
                         Text(
-                            "Cihaz üzerinde TensorFlow Lite + Real-ESRGAN x4plus kullanılır. Model ilk kullanımda indirilir ve cihazda saklanır.",
+                            "Real-ESRGAN x4plus modeli cihazda çalışır. İlk kullanımda yaklaşık 67 MB model indirilir ve sonraki kullanımlarda tekrar indirilmez.",
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
                 }
-                Spacer(Modifier.height(12.dp))
+
+                resultBitmap?.let { bitmap ->
+                    Spacer(Modifier.height(14.dp))
+                    PreviewCard("Sonra • 4× AI Upscale", bitmap, 330)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Çıkış: ${bitmap.width} × ${bitmap.height} px",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = { saveResult() },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("✓ SONUCU KAYDET")
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
             }
         }
     }
@@ -247,27 +304,33 @@ private suspend fun uriToBitmap(context: Context, uri: Uri): Bitmap =
         } ?: error("Fotoğraf okunamadı")
     }
 
-private fun saveBitmapToGallery(context: Context, bitmap: Bitmap): Uri? {
-    val values = ContentValues().apply {
-        put(MediaStore.Images.Media.DISPLAY_NAME, "SFBStudio_${System.currentTimeMillis()}.jpg")
-        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-        put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SFBStudio")
-        put(MediaStore.Images.Media.IS_PENDING, 1)
-    }
+private suspend fun saveBitmapToGallery(context: Context, bitmap: Bitmap): Uri =
+    withContext(Dispatchers.IO) {
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "SFBStudio_${System.currentTimeMillis()}.jpg")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/SFBStudio")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
 
-    val resolver = context.contentResolver
-    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
+        val resolver = context.contentResolver
+        val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            ?: error("Galeri kaydı oluşturulamadı")
 
-    return runCatching {
-        resolver.openOutputStream(uri)?.use { output ->
-            check(bitmap.compress(Bitmap.CompressFormat.JPEG, 95, output)) { "Görsel kaydedilemedi" }
-        } ?: error("Dosya açılamadı")
-        values.clear()
-        values.put(MediaStore.Images.Media.IS_PENDING, 0)
-        resolver.update(uri, values, null, null)
-        uri
-    }.getOrElse {
-        resolver.delete(uri, null, null)
-        throw it
+        try {
+            resolver.openOutputStream(uri)?.use { output ->
+                check(bitmap.compress(Bitmap.CompressFormat.JPEG, 95, output)) {
+                    "Görsel sıkıştırılamadı"
+                }
+            } ?: error("Çıkış dosyası açılamadı")
+
+            val done = ContentValues().apply {
+                put(MediaStore.Images.Media.IS_PENDING, 0)
+            }
+            resolver.update(uri, done, null, null)
+            uri
+        } catch (t: Throwable) {
+            resolver.delete(uri, null, null)
+            throw t
+        }
     }
-}
