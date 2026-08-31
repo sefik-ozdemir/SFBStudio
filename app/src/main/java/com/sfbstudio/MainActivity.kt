@@ -1,5 +1,7 @@
 package com.sfbstudio
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.graphics.Bitmap
@@ -41,6 +43,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -61,6 +64,8 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        AppLogger.init(applicationContext)
+        AppLogger.i("APP", "MainActivity onCreate")
         enableEdgeToEdge()
         setContent { SfbStudioApp() }
     }
@@ -71,9 +76,14 @@ private fun SfbStudioApp() {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val upscaler = remember { RealEsrganUpscaler(context.applicationContext) }
+    var logVersion by remember { mutableStateOf(0) }
 
     DisposableEffect(Unit) {
-        onDispose { upscaler.close() }
+        AppLogger.i("UI", "SFB Studio UI oluşturuldu")
+        onDispose {
+            AppLogger.i("UI", "SFB Studio UI dispose")
+            upscaler.close()
+        }
     }
 
     var selectedUri by remember { mutableStateOf<Uri?>(null) }
@@ -87,32 +97,44 @@ private fun SfbStudioApp() {
     val picker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
-        if (uri == null) return@rememberLauncherForActivityResult
+        if (uri == null) {
+            AppLogger.w("PICKER", "Kullanıcı fotoğraf seçimini iptal etti")
+            return@rememberLauncherForActivityResult
+        }
         scope.launch {
             runCatching {
                 busy = true
                 operation = "Fotoğraf hazırlanıyor…"
                 resultBitmap = null
+                AppLogger.i("PICKER", "Fotoğraf seçildi | uri=$uri")
                 val bitmap = uriToBitmap(context, uri)
+                check(bitmap.width > 0 && bitmap.height > 0) { "Geçersiz fotoğraf boyutu" }
                 selectedUri = uri
                 selectedBitmap = bitmap
                 resolutionText = "Giriş: ${bitmap.width} × ${bitmap.height} px"
                 status = "Fotoğraf hazır. Şimdi 4× AI Upscale'a basın."
                 operation = ""
+                AppLogger.i("PICKER", "Fotoğraf başarıyla okundu | ${bitmap.width}x${bitmap.height} config=${bitmap.config} | ${AppLogger.deviceSnapshot()}")
             }.onFailure {
+                AppLogger.e("PICKER", "Fotoğraf hazırlama başarısız", it)
                 status = "Hata: ${it.message ?: "fotoğraf okunamadı"}"
                 operation = ""
             }
             busy = false
+            logVersion++
         }
     }
 
     fun startUpscale() {
-        val uri = selectedUri ?: return
+        val uri = selectedUri ?: run {
+            AppLogger.w("UPSCALE_UI", "Upscale isteği geldi ancak seçili fotoğraf yok")
+            return
+        }
         scope.launch {
             busy = true
             operation = "AI modeli kontrol ediliyor…"
             status = "Hazırlanıyor…"
+            AppLogger.i("UPSCALE_UI", "Upscale butonuna basıldı | uri=$uri")
             runCatching {
                 upscaler.ensureModel()
                 operation = "AI Upscale çalışıyor…"
@@ -122,28 +144,44 @@ private fun SfbStudioApp() {
                 status = "Tamamlandı • 4× AI Upscale"
                 resolutionText = "Giriş: ${selectedBitmap?.width} × ${selectedBitmap?.height} px  →  Çıkış: ${result.width} × ${result.height} px"
             }.onFailure {
+                AppLogger.e("UPSCALE_UI", "Upscale akışı başarısız", it)
                 resultBitmap = null
                 status = "Upscale hatası: ${it.message ?: "işlem başarısız"}"
             }
             operation = ""
             busy = false
+            logVersion++
         }
     }
 
     fun saveResult() {
         val bitmap = resultBitmap ?: run {
+            AppLogger.w("SAVE_UI", "Kaydetme istendi ancak upscale sonucu yok")
             Toast.makeText(context, "Önce 4× AI Upscale işlemini tamamlayın", Toast.LENGTH_SHORT).show()
             return
         }
         scope.launch {
+            AppLogger.i("SAVE_UI", "Kaydetme başladı | bitmap=${bitmap.width}x${bitmap.height}")
             runCatching {
                 saveBitmapToGallery(context, bitmap)
             }.onSuccess {
+                AppLogger.i("SAVE_UI", "Kaydetme başarılı | uri=$it")
                 Toast.makeText(context, "Sonuç Pictures/SFBStudio içine kaydedildi", Toast.LENGTH_LONG).show()
             }.onFailure {
+                AppLogger.e("SAVE_UI", "Kaydetme başarısız", it)
                 Toast.makeText(context, "Kaydetme hatası: ${it.message}", Toast.LENGTH_LONG).show()
             }
+            logVersion++
         }
+    }
+
+    fun copyLogs() {
+        val logs = AppLogger.read()
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("SFB Studio Tanı Logu", logs))
+        Toast.makeText(context, "Tanı logları panoya kopyalandı", Toast.LENGTH_SHORT).show()
+        AppLogger.i("LOG_UI", "Tanı logları panoya kopyalandı")
+        logVersion++
     }
 
     MaterialTheme {
@@ -266,10 +304,28 @@ private fun SfbStudioApp() {
                     }
                 }
 
+                Spacer(Modifier.height(14.dp))
+                OutlinedButton(
+                    onClick = { copyLogs() },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("🛠 TANILAMA LOGLARINI KOPYALA")
+                }
+                Text(
+                    "Bir hata olursa bu butona basıp logları bana gönderin. Model indirme, HTTP, TensorFlow Lite, tile, bellek ve kaydetme adımları kaydedilir.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
+                )
+
                 Spacer(Modifier.height(16.dp))
             }
         }
     }
+
+    // Keeps this composable explicitly dependent on log updates so the diagnostic action
+    // is never optimized away during recomposition.
+    LaunchedEffect(logVersion) { }
 }
 
 @Composable
