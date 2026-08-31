@@ -32,8 +32,12 @@ class RealEsrganUpscaler(private val context: Context) {
     private var interpreter: Interpreter? = null
 
     suspend fun ensureModel(): String = withContext(Dispatchers.IO) {
+        val started = System.currentTimeMillis()
         val file = File(context.filesDir, MODEL_NAME)
+        AppLogger.i("MODEL", "ensureModel başladı | exists=${file.exists()} size=${file.length()} | ${AppLogger.deviceSnapshot()}")
+
         if (file.exists() && file.length() >= MODEL_MIN_BYTES) {
+            AppLogger.i("MODEL", "Model zaten hazır | bytes=${file.length()} | elapsed=${System.currentTimeMillis() - started}ms")
             return@withContext "AI modeli cihazda hazır"
         }
 
@@ -49,14 +53,16 @@ class RealEsrganUpscaler(private val context: Context) {
             .build()
 
         var lastError: Throwable? = null
-        for (url in listOf(MODEL_URL_PRIMARY, MODEL_URL_PINNED)) {
+        for ((index, url) in listOf(MODEL_URL_PRIMARY, MODEL_URL_PINNED).withIndex()) {
             try {
+                AppLogger.i("MODEL_DOWNLOAD", "Deneme ${index + 1}/2 başladı | url=$url")
                 val request = Request.Builder()
                     .url(url)
                     .header("User-Agent", "SFBStudio/0.4 Android")
                     .build()
 
                 client.newCall(request).execute().use { response ->
+                    AppLogger.i("MODEL_DOWNLOAD", "HTTP yanıtı | attempt=${index + 1} code=${response.code} message=${response.message} contentLength=${response.body?.contentLength()}")
                     if (!response.isSuccessful) {
                         error("Model sunucusu HTTP ${response.code}")
                     }
@@ -66,19 +72,23 @@ class RealEsrganUpscaler(private val context: Context) {
                     }
                 }
 
+                AppLogger.i("MODEL_DOWNLOAD", "İndirme tamamlandı | tempBytes=${temp.length()}")
                 check(temp.length() >= MODEL_MIN_BYTES) {
                     "İndirilen model eksik (${temp.length()} byte)"
                 }
 
                 if (file.exists()) file.delete()
                 check(temp.renameTo(file)) { "Model dosyası kaydedilemedi" }
+                AppLogger.i("MODEL", "Model başarıyla kaydedildi | bytes=${file.length()} | elapsed=${System.currentTimeMillis() - started}ms")
                 return@withContext "AI modeli indirildi ve hazır"
             } catch (t: Throwable) {
                 lastError = t
+                AppLogger.e("MODEL_DOWNLOAD", "Deneme ${index + 1}/2 başarısız | tempBytes=${temp.length()}", t)
                 temp.delete()
             }
         }
 
+        AppLogger.e("MODEL", "Tüm model indirme denemeleri başarısız | elapsed=${System.currentTimeMillis() - started}ms", lastError)
         throw IllegalStateException(
             "AI modeli indirilemedi. İnternet bağlantısını kontrol edip tekrar deneyin. " +
                 "Son hata: ${lastError?.message ?: "bilinmeyen hata"}"
@@ -86,18 +96,32 @@ class RealEsrganUpscaler(private val context: Context) {
     }
 
     suspend fun upscale(uri: Uri): Bitmap = withContext(Dispatchers.Default) {
-        val input = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
-            ?: error("Fotoğraf okunamadı")
-        upscaleBitmap(input)
+        val started = System.currentTimeMillis()
+        AppLogger.i("UPSCALE", "Upscale başladı | uri=$uri | ${AppLogger.deviceSnapshot()}")
+        try {
+            val input = context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+                ?: error("Fotoğraf okunamadı")
+            AppLogger.i("UPSCALE", "Kaynak bitmap hazır | ${input.width}x${input.height} config=${input.config}")
+            val result = upscaleBitmap(input)
+            AppLogger.i("UPSCALE", "Upscale tamamlandı | output=${result.width}x${result.height} | elapsed=${System.currentTimeMillis() - started}ms | ${AppLogger.deviceSnapshot()}")
+            result
+        } catch (t: Throwable) {
+            AppLogger.e("UPSCALE", "Upscale başarısız | elapsed=${System.currentTimeMillis() - started}ms | ${AppLogger.deviceSnapshot()}", t)
+            throw t
+        }
     }
 
     private fun loadInterpreter(): Interpreter {
-        interpreter?.let { return it }
+        interpreter?.let {
+            AppLogger.d("TFLITE", "Mevcut Interpreter yeniden kullanılıyor")
+            return it
+        }
         val file = File(context.filesDir, MODEL_NAME)
         check(file.exists() && file.length() >= MODEL_MIN_BYTES) {
             "AI modeli hazır değil. Önce modeli indirip tekrar deneyin."
         }
 
+        AppLogger.i("TFLITE", "Interpreter oluşturuluyor | modelBytes=${file.length()} | ${AppLogger.deviceSnapshot()}")
         val bytes = file.readBytes()
         val buffer = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder())
         buffer.put(bytes)
@@ -106,7 +130,10 @@ class RealEsrganUpscaler(private val context: Context) {
         return Interpreter(
             buffer,
             Interpreter.Options().apply { setNumThreads(4) }
-        ).also { interpreter = it }
+        ).also {
+            interpreter = it
+            AppLogger.i("TFLITE", "Interpreter hazır | inputShape=${it.getInputTensor(0).shape().contentToString()} outputShape=${it.getOutputTensor(0).shape().contentToString()} inputType=${it.getInputTensor(0).dataType()} outputType=${it.getOutputTensor(0).dataType()}")
+        }
     }
 
     private fun upscaleBitmap(source: Bitmap): Bitmap {
@@ -124,6 +151,7 @@ class RealEsrganUpscaler(private val context: Context) {
             source.copy(Bitmap.Config.ARGB_8888, false)
         }
 
+        AppLogger.i("UPSCALE", "Tile işleme başladı | source=${src.width}x${src.height} tile=$MODEL_INPUT_SIZE scale=$SCALE | ${AppLogger.deviceSnapshot()}")
         val out = Bitmap.createBitmap(
             src.width * SCALE,
             src.height * SCALE,
@@ -132,11 +160,14 @@ class RealEsrganUpscaler(private val context: Context) {
         val canvas = Canvas(out)
 
         var y = 0
+        var tileCount = 0
         while (y < src.height) {
             var x = 0
             while (x < src.width) {
                 val w = minOf(MODEL_INPUT_SIZE, src.width - x)
                 val h = minOf(MODEL_INPUT_SIZE, src.height - y)
+                tileCount++
+                AppLogger.d("TILE", "tile#$tileCount x=$x y=$y size=${w}x${h} | ${AppLogger.deviceSnapshot()}")
                 val tile = Bitmap.createBitmap(src, x, y, w, h)
                 val result = runTile(model, tile, w, h)
                 canvas.drawBitmap(result, x * SCALE.toFloat(), y * SCALE.toFloat(), null)
@@ -148,6 +179,7 @@ class RealEsrganUpscaler(private val context: Context) {
         }
 
         if (src !== source) src.recycle()
+        AppLogger.i("UPSCALE", "Tile işleme tamamlandı | tiles=$tileCount output=${out.width}x${out.height} | ${AppLogger.deviceSnapshot()}")
         return out
     }
 
@@ -160,9 +192,8 @@ class RealEsrganUpscaler(private val context: Context) {
         val inputShape = model.getInputTensor(0).shape()
         val inputH = if (inputShape[1] > 0) inputShape[1] else MODEL_INPUT_SIZE
         val inputW = if (inputShape[2] > 0) inputShape[2] else MODEL_INPUT_SIZE
+        AppLogger.d("TILE_IN", "Input hazırlanıyor | tile=${width}x${height} modelInput=${inputW}x${inputH}")
 
-        // The Qualcomm mobile model is trained/exported for 128x128 input.
-        // Edge tiles are padded with their nearest pixel and cropped back after inference.
         val inputBitmap = Bitmap.createBitmap(inputW, inputH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(inputBitmap)
         val scaleX = inputW.toFloat() / width
@@ -192,7 +223,9 @@ class RealEsrganUpscaler(private val context: Context) {
         val output = ByteBuffer.allocateDirect(outputW * outputH * 3 * 4)
             .order(ByteOrder.nativeOrder())
 
+        val inferenceStarted = System.currentTimeMillis()
         model.run(input, output)
+        AppLogger.d("TFLITE", "Inference tamamlandı | tile=${width}x${height} output=${outputW}x${outputH} elapsed=${System.currentTimeMillis() - inferenceStarted}ms | ${AppLogger.deviceSnapshot()}")
         output.rewind()
 
         val fullResult = Bitmap.createBitmap(outputW, outputH, Bitmap.Config.ARGB_8888)
@@ -213,6 +246,7 @@ class RealEsrganUpscaler(private val context: Context) {
     }
 
     fun close() {
+        AppLogger.i("TFLITE", "Interpreter kapatılıyor")
         interpreter?.close()
         interpreter = null
     }
